@@ -7,9 +7,12 @@ import pytz
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 
-load_dotenv()
+load_dotenv(override=True)
 
-from market_briefing import build_prompt, generate_briefing, send_email
+from market_briefing import (
+    build_email_prompt, generate_briefing, send_email,
+    fetch_all_data,
+)
 from config import MARKETS_CONFIG, PORTFOLIO
 
 app = FastAPI(title="PortfolioGuru API")
@@ -21,7 +24,8 @@ def trigger_briefing():
     """Generate a market briefing with Gemini and send it via Resend."""
     now = datetime.now(IST)
     try:
-        prompt = build_prompt(MARKETS_CONFIG, PORTFOLIO)
+        verified_data = fetch_all_data(PORTFOLIO, MARKETS_CONFIG)
+        prompt = build_email_prompt(MARKETS_CONFIG, PORTFOLIO, verified_data)
         html = generate_briefing(prompt)
         subject = (
             f"Daily Market Briefing — "

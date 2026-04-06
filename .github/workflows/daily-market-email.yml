@@ -20,4 +20,5 @@ jobs:
           GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           RESEND_API_KEY:      ${{ secrets.RESEND_API_KEY }}
           RECIPIENT_EMAIL:     ${{ secrets.RECIPIENT_EMAIL }}
+          PORTFOLIO_JSON:      ${{ secrets.PORTFOLIO_JSON }}
         run: python market_briefing.py

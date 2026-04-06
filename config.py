@@ -1,54 +1,15 @@
 """PortfolioGuru Configuration — Portfolio Holdings & Market Settings.
 
-Edit this file to update your holdings and market preferences.
-Changes take effect at the next scheduled run (9:00 AM IST, Mon-Fri).
+Portfolio is loaded from the PORTFOLIO_JSON environment variable (set as a
+GitHub Actions secret for CI, or in .env for local development).
+Changes to market preferences take effect at the next scheduled run.
 """
 
-PORTFOLIO = {
-    # -- STOCKS ---------------------------------------------------------------
-    "RELIANCE": {
-        "name": "Reliance Industries",
-        "exchange": "NSE",
-        "qty": 50,
-        "avg_price": 2450.00,
-        "asset_type": "stock",
-        "market": "IN",
-    },
-    "INFY": {
-        "name": "Infosys",
-        "exchange": "NSE",
-        "qty": 100,
-        "avg_price": 1680.00,
-        "asset_type": "stock",
-        "market": "IN",
-    },
-    "HDFCBANK": {
-        "name": "HDFC Bank",
-        "exchange": "NSE",
-        "qty": 30,
-        "avg_price": 1720.00,
-        "asset_type": "stock",
-        "market": "IN",
-    },
+import json
+import os
 
-    # -- MUTUAL FUNDS ---------------------------------------------------------
-    "PPFAS_FLEXI": {
-        "name": "Parag Parikh Flexi Cap Fund - Direct Growth",
-        "amfi_code": "122639",
-        "units": 250.456,
-        "avg_nav": 68.50,
-        "asset_type": "mutual_fund",
-        "market": "IN",
-    },
-    "MIRAE_LARGECAP": {
-        "name": "Mirae Asset Large Cap Fund - Direct Growth",
-        "amfi_code": "118834",
-        "units": 500.000,
-        "avg_nav": 110.25,
-        "asset_type": "mutual_fund",
-        "market": "IN",
-    },
-}
+_portfolio_json = os.environ.get("PORTFOLIO_JSON", "{}")
+PORTFOLIO = json.loads(_portfolio_json)
 
 
 MARKETS_CONFIG = {
