@@ -2,17 +2,18 @@
 
 Uses Gemini 2.5 Pro with Google Search grounding to generate a comprehensive
 HTML email report covering Indian and global markets, portfolio analysis,
-and actionable recommendations. Sent daily at 9:00 AM IST via Gmail.
+and actionable recommendations. Sent daily at 9:00 AM IST via Resend.
 """
 
 import json
 import os
-import smtplib
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 import pytz
+import resend
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 from google import genai
 from google.genai import types
 
@@ -20,17 +21,16 @@ from config import MARKETS_CONFIG, PORTFOLIO
 
 # -- Config -------------------------------------------------------------------
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GMAIL_USER = os.environ["GMAIL_USER"]
-GMAIL_APP_PASS = os.environ["GMAIL_APP_PASSWORD"]
+RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 RECIPIENT_EMAIL = os.environ["RECIPIENT_EMAIL"]
-MODEL = "gemini-2.5-pro-preview-06-05"
+MODEL = "gemini-2.5-flash"
 
 IST = pytz.timezone("Asia/Kolkata")
-now = datetime.now(IST)
 
 
 # -- Prompt -------------------------------------------------------------------
 def build_prompt(markets_config: dict, portfolio: dict) -> str:
+    now = datetime.now(IST)
     active_markets = {
         k: v for k, v in markets_config.items() if v.get("active")
     }
@@ -98,23 +98,23 @@ def generate_briefing(prompt: str) -> str:
 
 # -- Send Email ---------------------------------------------------------------
 def send_email(html_body: str, subject: str):
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = GMAIL_USER
-    msg["To"] = RECIPIENT_EMAIL
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_USER, GMAIL_APP_PASS)
-        server.send_message(msg)
+    resend.api_key = RESEND_API_KEY
+    resend.Emails.send({
+        "from": "PortfolioGuru <onboarding@resend.dev>",
+        "to": [RECIPIENT_EMAIL],
+        "subject": subject,
+        "html": html_body,
+    })
 
 
 # -- Main ---------------------------------------------------------------------
 if __name__ == "__main__":
+    now = datetime.now(IST)
     prompt = build_prompt(MARKETS_CONFIG, PORTFOLIO)
     html = generate_briefing(prompt)
     subject = (
-        f"📊 Daily Market Briefing — "
+        f"Daily Market Briefing — "
         f"{now.strftime('%a, %d %b %Y')} | Powered by Gemini 2.5 Pro"
     )
     send_email(html, subject)
-    print(f"✅ Briefing sent at {now.strftime('%I:%M %p IST')}")
+    print(f"Briefing sent at {now.strftime('%I:%M %p IST')}")
