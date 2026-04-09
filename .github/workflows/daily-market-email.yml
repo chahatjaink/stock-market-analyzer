@@ -15,8 +15,12 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install -r requirements.txt
+      # Repo secrets: GROQ_API_KEY (when LLM_BACKEND=groq), GEMINI_API_KEY (when gemini),
+      # RESEND_API_KEY, RECIPIENT_EMAIL, PORTFOLIO_JSON
       - name: Send daily briefing
         env:
+          LLM_BACKEND:         groq
+          GROQ_API_KEY:        ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           RESEND_API_KEY:      ${{ secrets.RESEND_API_KEY }}
           RECIPIENT_EMAIL:     ${{ secrets.RECIPIENT_EMAIL }}
