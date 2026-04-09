@@ -8,7 +8,7 @@ Changes to market preferences take effect at the next scheduled run.
 import json
 import os
 
-_portfolio_json = os.environ.get("PORTFOLIO_JSON", "{}")
+_portfolio_json = os.environ.get("PORTFOLIO_JSON", "") or "{}"
 PORTFOLIO = json.loads(_portfolio_json)
 
 

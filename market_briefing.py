@@ -1,8 +1,14 @@
 """PortfolioGuru — Daily AI-powered market briefing.
 
-Uses a two-step Gemini approach (only 2 API calls total):
-  Step 1: Search & extract ALL verified data as JSON (stocks, MFs, indices).
-  Step 2: Generate the HTML email using only the verified data.
+Two backends (set LLM_BACKEND=groq | gemini; default groq):
+
+  groq (free-tier friendly):
+    Step 1: Programmatic data — yfinance + AMFI NAV (no LLM, no web search).
+    Step 2: Groq (OpenAI-compatible API) generates HTML from verified data.
+
+  gemini:
+    Step 1: Gemini + Google Search → JSON.
+    Step 2: Gemini generates HTML.
 
 Sent daily at 9:00 AM IST via Resend.
 """
@@ -17,22 +23,101 @@ import pytz
 import resend
 from dotenv import load_dotenv
 
-load_dotenv()
-from google import genai
-from google.genai import types
+load_dotenv(override=True)
 
 from config import MARKETS_CONFIG, PORTFOLIO
+from verified_market_data import fetch_verified_data_programmatic
 
 # -- Config -------------------------------------------------------------------
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 RECIPIENT_EMAIL = os.environ["RECIPIENT_EMAIL"]
-MODEL = "gemini-2.5-flash"
+
+LLM_BACKEND = (os.environ.get("LLM_BACKEND") or "groq").strip().lower()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_BASE_URL = os.environ.get(
+    "GROQ_BASE_URL", "https://api.groq.com/openai/v1"
+)
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MAX_OUTPUT_TOKENS = int(
+    os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "8192")
+)
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 IST = pytz.timezone("Asia/Kolkata")
 
 
-# -- Gemini helper ------------------------------------------------------------
+def _drop_empty(obj):
+    """Remove None / empty strings / empty collections (keeps 0 and False)."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if v is None or v == "":
+                continue
+            cv = _drop_empty(v)
+            if cv is None:
+                continue
+            if cv == {} or cv == []:
+                continue
+            out[k] = cv
+        return out
+    if isinstance(obj, list):
+        out = []
+        for x in obj:
+            cx = _drop_empty(x)
+            if cx is None or cx == {} or cx == []:
+                continue
+            out.append(cx)
+        return out
+    return obj
+
+
+def _json_compact(obj) -> str:
+    return json.dumps(
+        _drop_empty(obj),
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def _active_markets_slim(markets_config: dict) -> dict:
+    """Only labels + index/pair lists — drops long notes/sources (saves tokens)."""
+    out = {}
+    for k, v in markets_config.items():
+        if not v.get("active"):
+            continue
+        row = {"label": v.get("label")}
+        if v.get("indices"):
+            row["indices"] = v["indices"]
+        if v.get("pairs"):
+            row["pairs"] = v["pairs"]
+        if v.get("currency"):
+            row["currency"] = v["currency"]
+        out[k] = row
+    return out
+
+
+def _require_backend_keys():
+    if LLM_BACKEND == "gemini":
+        if not GEMINI_API_KEY:
+            raise RuntimeError(
+                "LLM_BACKEND=gemini but GEMINI_API_KEY is not set."
+            )
+    elif LLM_BACKEND == "groq":
+        if not GROQ_API_KEY:
+            raise RuntimeError(
+                "LLM_BACKEND=groq but GROQ_API_KEY is not set. "
+                "Get a free key at https://console.groq.com/keys"
+            )
+    else:
+        raise RuntimeError(
+            f"Unknown LLM_BACKEND={LLM_BACKEND!r} (use groq or gemini)."
+        )
+
+
+# -- LLM helpers --------------------------------------------------------------
 def _extract_json(text: str) -> dict:
     """Extract JSON object from text that may contain extra content."""
     text = text.strip()
@@ -62,12 +147,15 @@ def _extract_json(text: str) -> dict:
 def _gemini_call(prompt: str, max_tokens: int = 16384,
                  parse_json: bool = False, retries: int = 2) -> str | dict:
     """Call Gemini with Google Search, with rate-limit retry."""
+    from google import genai
+    from google.genai import types
+
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     for attempt in range(retries + 1):
         try:
             response = client.models.generate_content(
-                model=MODEL,
+                model=GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
@@ -75,13 +163,23 @@ def _gemini_call(prompt: str, max_tokens: int = 16384,
                     max_output_tokens=max_tokens,
                 ),
             )
-            text = response.text.strip()
+            text = (response.text or "").strip()
+            if not text:
+                # Debug: log why the response is empty
+                if response.candidates:
+                    c = response.candidates[0]
+                    reason = getattr(c, "finish_reason", "unknown")
+                    safety = getattr(c, "safety_ratings", [])
+                    print(f"    Empty response — finish_reason: {reason}, safety: {safety}")
+                else:
+                    print(f"    Empty response — no candidates. prompt_feedback: {getattr(response, 'prompt_feedback', 'N/A')}")
+                raise ValueError("Gemini returned an empty response")
             if parse_json:
                 return _extract_json(text)
             return text
         except Exception as e:
             err_str = str(e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str or "UNAVAILABLE" in err_str or "empty response" in err_str:
                 wait = 60
                 retry_match = re.search(r"retry\s+in\s+([\d.]+)s", err_str, re.I)
                 if retry_match:
@@ -97,9 +195,63 @@ def _gemini_call(prompt: str, max_tokens: int = 16384,
             raise
 
 
+def _groq_call(prompt: str, max_tokens: int = 32768,
+               parse_json: bool = False, retries: int = 2) -> str | dict:
+    """Groq OpenAI-compatible chat completion."""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
+
+    kwargs = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0 if parse_json else 0.2,
+        "max_tokens": max_tokens,
+    }
+    if parse_json:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    for attempt in range(retries + 1):
+        try:
+            response = client.chat.completions.create(**kwargs)
+            msg = response.choices[0].message
+            text = (msg.content or "").strip()
+            if not text:
+                raise ValueError("Groq returned an empty response")
+            if parse_json:
+                return _extract_json(text)
+            return text
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "rate" in err_str.lower() or "503" in err_str:
+                wait = 30
+                if attempt < retries:
+                    print(f"    Groq rate limited / unavailable. Waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+            if parse_json and ("JSONDecode" in err_str or "No JSON" in err_str):
+                if attempt < retries:
+                    print(f"    JSON parse error. Retrying...")
+                    continue
+            raise
+
+
+def _llm_call(prompt: str, max_tokens: int = 32768,
+              parse_json: bool = False, retries: int = 2) -> str | dict:
+    """Dispatch to Groq or Gemini for text / JSON output."""
+    if LLM_BACKEND == "groq":
+        return _groq_call(prompt, max_tokens=max_tokens, parse_json=parse_json,
+                          retries=retries)
+    return _gemini_call(prompt, max_tokens=max_tokens, parse_json=parse_json,
+                        retries=retries)
+
+
 # -- Step 1: Fetch ALL data ---------------------------------------------------
 def fetch_all_data(portfolio: dict, markets_config: dict) -> dict:
-    """Single Gemini call to fetch all verified market data."""
+    """Gemini + search, or programmatic yfinance + AMFI when LLM_BACKEND=groq."""
+    if LLM_BACKEND == "groq":
+        return fetch_verified_data_programmatic(portfolio)
+
     stocks = {k: {"name": v.get("name", k),
                    "nse_symbol": v.get("nse_symbol", k),
                    "search_query": v.get("search_query", "")}
@@ -208,9 +360,7 @@ Do NOT omit any. Output ONLY the JSON object, nothing else.
 def build_email_prompt(markets_config: dict, portfolio: dict,
                        verified_data: dict) -> str:
     now = datetime.now(IST)
-    active_markets = {
-        k: v for k, v in markets_config.items() if v.get("active")
-    }
+    active_markets = _active_markets_slim(markets_config)
 
     # Compute P&L for stocks
     stocks_display = {}
@@ -258,19 +408,19 @@ Today is {now.strftime('%A, %d %B %Y')}. Time: {now.strftime('%I:%M %p')} IST.
 You are PortfolioGuru. Generate a complete daily market briefing HTML email.
 
 === ACTIVE MARKETS ===
-{json.dumps(active_markets, indent=2)}
+{_json_compact(active_markets)}
 
 === VERIFIED DATA (use EXACT numbers — do NOT change any value) ===
 
-Indices: {json.dumps(verified_data.get("indices", {}), indent=2)}
-FII/DII: {json.dumps(verified_data.get("fii_dii", {}), indent=2)}
-NIFTY Gainers: {json.dumps(verified_data.get("nifty_gainers", []), indent=2)}
-NIFTY Losers: {json.dumps(verified_data.get("nifty_losers", []), indent=2)}
-Gift Nifty: {json.dumps(verified_data.get("gift_nifty", {}), indent=2)}
+Indices: {_json_compact(verified_data.get("indices", {}))}
+FII/DII: {_json_compact(verified_data.get("fii_dii", {}))}
+NIFTY Gainers: {_json_compact(verified_data.get("nifty_gainers", []))}
+NIFTY Losers: {_json_compact(verified_data.get("nifty_losers", []))}
+Gift Nifty: {_json_compact(verified_data.get("gift_nifty", {}))}
 India VIX: {verified_data.get("india_vix")}
-Stocks: {json.dumps(stocks_display, indent=2)}
-Mutual Funds: {json.dumps(mfs_display, indent=2)}
-News: {json.dumps(verified_data.get("top_news", []), indent=2)}
+Stocks: {_json_compact(stocks_display)}
+Mutual Funds: {_json_compact(mfs_display)}
+News: {_json_compact(verified_data.get("top_news", []))}
 
 === TASKS ===
 
@@ -317,7 +467,8 @@ CRITICAL: Use ONLY the numbers above. If null, show "N/A". NEVER invent data.
 
 def generate_briefing(prompt: str) -> str:
     """Step 2: Generate the HTML email."""
-    result = _gemini_call(prompt, max_tokens=32768, parse_json=False)
+    max_out = GROQ_MAX_OUTPUT_TOKENS if LLM_BACKEND == "groq" else 32768
+    result = _llm_call(prompt, max_tokens=max_out, parse_json=False)
     html = result.strip()
     if html.startswith("```"):
         html = html.split("```")[1]
@@ -340,21 +491,26 @@ def send_email(html_body: str, subject: str):
 # -- Main ---------------------------------------------------------------------
 if __name__ == "__main__":
     now = datetime.now(IST)
+    _require_backend_keys()
 
-    print("Step 1: Fetching all verified data via Gemini + Google Search...")
+    if LLM_BACKEND == "groq":
+        print("Step 1: Fetching verified data (yfinance + AMFI NAV)...")
+    else:
+        print("Step 1: Fetching all verified data via Gemini + Google Search...")
     verified_data = fetch_all_data(PORTFOLIO, MARKETS_CONFIG)
     stock_count = len(verified_data.get("stocks", {}))
     mf_count = len(verified_data.get("mutual_funds", {}))
     idx_count = len(verified_data.get("indices", {}))
     print(f"  -> {stock_count} stocks, {mf_count} MFs, {idx_count} indices")
 
-    print("Step 2: Generating HTML email...")
+    print(f"Step 2: Generating HTML email ({LLM_BACKEND})...")
     prompt = build_email_prompt(MARKETS_CONFIG, PORTFOLIO, verified_data)
     html = generate_briefing(prompt)
 
+    label = "Groq" if LLM_BACKEND == "groq" else "Gemini"
     subject = (
         f"Daily Market Briefing — "
-        f"{now.strftime('%a, %d %b %Y')} | Powered by Gemini 2.5 Pro"
+        f"{now.strftime('%a, %d %b %Y')} | {label}"
     )
     send_email(html, subject)
     print(f"Briefing sent at {now.strftime('%I:%M %p IST')}")
